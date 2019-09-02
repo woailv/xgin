@@ -24,12 +24,15 @@ const (
 	query_key_page     = "page"
 	query_key_item     = "item"
 	query_key_download = "download"
+	query_key_sort     = "sort"
 )
 
 type MsgData struct {
 	Data    interface{} `json:"data"`
 	Msg     string      `json:"msg"`
-	Errcode int         `json:"errcode"`
+	Errcode int         `json:"code"`
+
+	sort string //Data为Slice时的排序字段
 }
 
 type ListData struct {
@@ -77,7 +80,8 @@ func (xc *XCtx) StatusCode(statusCode int) *XCtx {
 }
 
 func (xc *XCtx) Json(data interface{}) *XCtx {
-	xc.data = data
+	// 数值类型保留两位小数
+	xc.data = getDecimal2(data)
 	xc.dataKind = data_kind_json
 	return xc
 }
@@ -89,7 +93,8 @@ func (xc *XCtx) String(str string) *XCtx {
 }
 
 func (xc *XCtx) MsgData(data interface{}) *XCtx {
-	xc.GetMsgData().Data = data
+	// 数值类型保留两位小数
+	xc.GetMsgData().Data = getDecimal2(data)
 	return xc
 }
 
@@ -143,9 +148,66 @@ func (xc *XCtx) Item() int {
 
 // 响应分页数据
 func (xc *XCtx) List(list interface{}, total int) *XCtx {
-	listData := &ListData{List: list, Total: total}
+	// 数值类型保留两位小数
+	listData := &ListData{List: getDecimal2(list), Total: total}
 	xc.GetMsgData().Data = listData
 	return xc
+}
+
+func skip(page, item int) int {
+	if page == 0 {
+		return 0
+	}
+	return (page - 1) * limit(page, item)
+}
+
+func limit(page, item int) int {
+	if item == 0 && page != 0 {
+		return 10
+	} else if item != 0 && page != 0 {
+		return item
+	}
+	return 0
+}
+
+// 返回列表中的默认排序字段
+func (xc *XCtx) sortDef(str string) *XCtx {
+	md := xc.GetMsgData()
+	if s := xc.Query(query_key_sort); s == "" {
+		md.sort = str
+	} else {
+		md.sort = s
+	}
+	log.Println("排序字段:", md.sort)
+	return xc
+}
+
+// 接受客户端排序字段
+func (xc *XCtx) sort() *XCtx {
+	return xc.sortDef("")
+}
+
+// 响应对切片分页的数据(有分页操作)
+// 有排序字段要先调用排序字段的方法
+func (xc *XCtx) Slice(slice interface{}) *XCtx {
+	list, total := sliceData(slice, xc.Page(), xc.Item())
+	return xc.List(list, total)
+}
+
+func (xc *XCtx) SliceSortDef(slice interface{}, defSort string) *XCtx {
+	xc.sortDef(defSort)
+	if sort := xc.GetMsgData().sort; sort != "" { //排序
+		slice = getSortSlice(slice, sort)
+	}
+	return xc.Slice(slice)
+}
+
+func (xc *XCtx) SliceSort(slice interface{}) *XCtx {
+	xc.sort()
+	if sort := xc.GetMsgData().sort; sort != "" { //排序
+		slice = getSortSlice(slice, sort)
+	}
+	return xc.Slice(slice)
 }
 
 // 从查询参数里面解析响应表格表头的键值对,根据查询顺序排列表头顺序,不能使用默认解析到map中(map没有顺序)
@@ -160,7 +222,7 @@ func (xc *XCtx) excelTitle() [][]string {
 		if len(kv) != 2 {
 			continue
 		}
-		if kv[0] == query_key_page || kv[0] == query_key_item || kv[0] == query_key_download {
+		if kv[0] == query_key_page || kv[0] == query_key_item || kv[0] == query_key_download || kv[0] == query_key_sort {
 			continue
 		}
 		ss = append(ss, kv)
@@ -176,7 +238,6 @@ func (xc *XCtx) writeExcelFile() {
 	if !ok {
 		panic("通过分页数据生成excel文件异常,分页数据不是数ListData对象")
 	}
-
 	xf := xlsx.NewFile()
 	sheet, _ := xf.AddSheet("1")
 	bs, err := json.Marshal(ld.List)
